@@ -1,0 +1,33 @@
+# Copier configuration file
+_exclude:
+  - copier.yaml
+  - copier.yml
+  - "~*"
+  - "*.py[co]"
+  - __pycache__
+  - .git
+  - .DS_Store
+  - .svn
+  - .venv
+  - .venv/**
+_preserve_symlinks: true
+
+project_name:
+  type: str
+  help: Project directory and distribution name (lowercase letters, digits, hyphens, or underscores).
+  default: my_etl_project
+  validator: >-
+    {% if not project_name|regex_search('^[a-z][a-z0-9_-]*$') %}
+    Use lowercase letters, digits, hyphens, or underscores, and start with a letter.
+    {% endif %}
+
+module_name:
+  type: str
+  help: Python module name (lowercase letters, digits, and underscores; start with a letter).
+  default: "{{ project_name|lower|replace('-', '_') }}"
+  validator: >-
+    {% if not module_name|regex_search('^[a-z][a-z0-9_]*$') %}
+    Use lowercase letters, digits, and underscores, and start with a letter.
+    {% elif module_name in ['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'match', 'case', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield'] %}
+    This is a reserved Python keyword; choose another module name.
+    {% endif %}
