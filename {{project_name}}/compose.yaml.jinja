@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-etl_db}
+      POSTGRES_USER: ${POSTGRES_USER:-etl_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_only_change_me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow:
+    build: .
+    command: standalone
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      ETL_DB_HOST: postgres
+      ETL_DB_PORT: "5432"
+      ETL_DB_NAME: ${POSTGRES_DB:-etl_db}
+      ETL_DB_USER: ${POSTGRES_USER:-etl_user}
+      ETL_DB_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_only_change_me}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data:ro
+      - airflow_logs:/opt/airflow/logs
+
+volumes:
+  postgres_data:
+  airflow_logs:
