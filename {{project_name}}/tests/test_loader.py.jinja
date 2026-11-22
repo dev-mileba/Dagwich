@@ -1,0 +1,207 @@
+from datetime import date, datetime, timezone
+from decimal import Decimal
+import os
+
+import psycopg2
+from psycopg2 import sql
+import pytest
+
+from {{ module_name }} import loader
+from {{ module_name }}.schema import COLUMNS, COLUMN_NAMES, PRIMARY_KEY, TARGET_TABLE
+
+
+def _record(primary_value=None):
+    values = {}
+    for column in COLUMNS:
+        sql_type = column["sql_type"]
+        if sql_type == "TEXT":
+            value = "sample"
+        elif sql_type in {"INTEGER", "BIGINT"}:
+            value = 1
+        elif sql_type == "NUMERIC":
+            value = Decimal("1.25")
+        elif sql_type == "BOOLEAN":
+            value = True
+        elif sql_type == "DATE":
+            value = date(2025, 1, 1)
+        else:
+            value = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        values[column["name"]] = value
+    if primary_value is not None:
+        values[PRIMARY_KEY] = primary_value
+    return values
+
+
+class FakeCursor:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.statement = None
+        self.values = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def executemany(self, statement, values):
+        self.statement = statement
+        self.values = values
+        if self.fail:
+            raise RuntimeError("insert failed")
+
+
+class FakeConnection:
+    def __init__(self, fail=False):
+        self.fake_cursor = FakeCursor(fail)
+        self.commits = 0
+        self.rollbacks = 0
+        self.closes = 0
+
+    def cursor(self):
+        return self.fake_cursor
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closes += 1
+
+
+def test_load_records_binds_values_and_commits_batch():
+    connection = FakeConnection()
+    primary_column = next(column for column in COLUMNS if column["name"] == PRIMARY_KEY)
+    primary_values = {
+        "TEXT": ("first", "second"),
+        "INTEGER": (1, 2),
+        "BIGINT": (1, 2),
+        "NUMERIC": (Decimal("1"), Decimal("2")),
+        "BOOLEAN": (True, False),
+        "DATE": (date(2025, 1, 1), date(2025, 1, 2)),
+        "TIMESTAMPTZ": (
+            datetime(2025, 1, 1, tzinfo=timezone.utc),
+            datetime(2025, 1, 2, tzinfo=timezone.utc),
+        ),
+    }[primary_column["sql_type"]]
+    records = [_record(primary_values[0]), _record(primary_values[1])]
+
+    assert loader.load_records(records, connection=connection) == 2
+    assert isinstance(connection.fake_cursor.statement, sql.Composed)
+    assert connection.fake_cursor.values == [
+        tuple(record[name] for name in COLUMN_NAMES) for record in records
+    ]
+    assert connection.commits == 1
+    assert connection.rollbacks == 0
+    assert connection.closes == 0
+
+
+def test_load_records_rolls_back_and_propagates_database_errors():
+    connection = FakeConnection(fail=True)
+
+    with pytest.raises(RuntimeError, match="insert failed"):
+        loader.load_records([_record()], connection=connection)
+
+    assert connection.commits == 0
+    assert connection.rollbacks == 1
+
+
+def test_load_records_rejects_bad_records_before_connecting():
+    with pytest.raises(ValueError, match="missing columns"):
+        loader.load_records([{}], connection=FakeConnection())
+
+    record = _record()
+    record[PRIMARY_KEY] = None
+    with pytest.raises(ValueError, match="primary key"):
+        loader.load_records([record], connection=FakeConnection())
+
+
+def test_empty_batch_does_not_open_database_connection(monkeypatch):
+    def fail_connect(**kwargs):
+        raise AssertionError("Empty loads must not connect")
+
+    monkeypatch.setattr(loader.psycopg2, "connect", fail_connect)
+    assert loader.load_records([]) == 0
+
+
+def test_owned_connection_uses_environment_and_is_closed(monkeypatch):
+    monkeypatch.setenv("ETL_DB_HOST", "postgres")
+    monkeypatch.setenv("ETL_DB_NAME", "etl")
+    monkeypatch.setenv("ETL_DB_USER", "etl_user")
+    monkeypatch.setenv("ETL_DB_PASSWORD", "test_password")
+    monkeypatch.delenv("ETL_DB_PORT", raising=False)
+    connection = FakeConnection()
+    monkeypatch.setattr(loader.psycopg2, "connect", lambda **kwargs: connection)
+    assert loader.load_records([_record()]) == 1
+
+    assert connection.commits == 1
+    assert connection.closes == 1
+
+
+@pytest.mark.integration
+def test_postgres_upsert_round_trip(monkeypatch):
+    database_url = os.environ.get("ETL_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("Set ETL_TEST_DATABASE_URL to run disposable-Postgres integration tests")
+
+    table_name = f"etl_test_{os.getpid()}"
+    connection = psycopg2.connect(database_url)
+    try:
+        with connection.cursor() as cursor:
+            column_definitions = [
+                sql.SQL("{} {}{}").format(
+                    sql.Identifier(column["name"]),
+                    sql.SQL(column["sql_type"]),
+                    sql.SQL(" PRIMARY KEY") if column["primary_key"] else sql.SQL(""),
+                )
+                for column in COLUMNS
+            ]
+            cursor.execute(
+                sql.SQL("CREATE TABLE {} ({})").format(
+                    sql.Identifier(table_name),
+                    sql.SQL(", ").join(column_definitions),
+                )
+            )
+        connection.commit()
+
+        monkeypatch.setattr(loader, "TARGET_TABLE", table_name)
+        first_record = _record()
+        assert loader.load_records([first_record], connection=connection) == 1
+
+        updated_record = dict(first_record)
+        for column in COLUMNS:
+            if column["name"] != PRIMARY_KEY:
+                if column["sql_type"] == "TEXT":
+                    updated_record[column["name"]] = "updated"
+                elif column["sql_type"] in {"INTEGER", "BIGINT"}:
+                    updated_record[column["name"]] = 2
+                elif column["sql_type"] == "NUMERIC":
+                    updated_record[column["name"]] = Decimal("2.50")
+                elif column["sql_type"] == "BOOLEAN":
+                    updated_record[column["name"]] = False
+                elif column["sql_type"] == "DATE":
+                    updated_record[column["name"]] = date(2025, 1, 2)
+                else:
+                    updated_record[column["name"]] = datetime(
+                        2025, 1, 2, tzinfo=timezone.utc
+                    )
+        assert loader.load_records([updated_record], connection=connection) == 1
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("SELECT {} FROM {} WHERE {} = %s").format(
+                    sql.SQL(", ").join(sql.Identifier(name) for name in COLUMN_NAMES),
+                    sql.Identifier(table_name),
+                    sql.Identifier(PRIMARY_KEY),
+                ),
+                (updated_record[PRIMARY_KEY],),
+            )
+            assert cursor.fetchone() == tuple(updated_record[name] for name in COLUMN_NAMES)
+    finally:
+        connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name)))
+        connection.commit()
+        connection.close()

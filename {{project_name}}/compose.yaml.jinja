@@ -15,6 +15,23 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-test:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: etl_test_db
+      POSTGRES_USER: ${ETL_TEST_DB_USER:-etl_test_user}
+      POSTGRES_PASSWORD: ${ETL_TEST_DB_PASSWORD:-local_test_only}
+    ports:
+      - "${ETL_TEST_DB_PORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   airflow:
     build: .
     command: standalone
