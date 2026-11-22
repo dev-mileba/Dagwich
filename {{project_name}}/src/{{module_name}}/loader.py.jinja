@@ -1,0 +1,106 @@
+"""Load transformed records into the generated PostgreSQL target table."""
+
+import os
+from collections.abc import Mapping, Sequence
+
+import psycopg2
+from psycopg2 import sql
+
+from .schema import COLUMN_NAMES, PRIMARY_KEY, TARGET_TABLE
+
+
+def _connection_settings() -> dict[str, str | int]:
+    required = ("ETL_DB_HOST", "ETL_DB_NAME", "ETL_DB_USER", "ETL_DB_PASSWORD")
+    settings: dict[str, str | int] = {}
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        raise ValueError(f"Missing required database environment variables: {', '.join(missing)}")
+
+    settings["host"] = os.environ["ETL_DB_HOST"]
+    settings["dbname"] = os.environ["ETL_DB_NAME"]
+    settings["user"] = os.environ["ETL_DB_USER"]
+    settings["password"] = os.environ["ETL_DB_PASSWORD"]
+
+    port_value = os.environ.get("ETL_DB_PORT", "5432")
+    try:
+        port = int(port_value)
+    except ValueError as error:
+        raise ValueError("ETL_DB_PORT must be an integer between 1 and 65535") from error
+    if not 1 <= port <= 65535:
+        raise ValueError("ETL_DB_PORT must be an integer between 1 and 65535")
+    settings["port"] = port
+    return settings
+
+
+def _upsert_statement():
+    column_identifiers = [sql.Identifier(name) for name in COLUMN_NAMES]
+    insert = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+        sql.Identifier(TARGET_TABLE),
+        sql.SQL(", ").join(column_identifiers),
+        sql.SQL(", ").join(sql.Placeholder() for _ in COLUMN_NAMES),
+    )
+    update_columns = [name for name in COLUMN_NAMES if name != PRIMARY_KEY]
+    if update_columns:
+        conflict = sql.SQL(" ON CONFLICT ({}) DO UPDATE SET {}").format(
+            sql.Identifier(PRIMARY_KEY),
+            sql.SQL(", ").join(
+                sql.SQL("{} = EXCLUDED.{}").format(
+                    sql.Identifier(name),
+                    sql.Identifier(name),
+                )
+                for name in update_columns
+            ),
+        )
+    else:
+        conflict = sql.SQL(" ON CONFLICT ({}) DO NOTHING").format(
+            sql.Identifier(PRIMARY_KEY)
+        )
+    return insert + conflict
+
+
+def load_records(
+    records: Sequence[Mapping[str, object]],
+    *,
+    connection=None,
+) -> int:
+    """Atomically upsert records; return the number of records submitted.
+
+    A supplied connection remains open for its caller. Otherwise the connection
+    is created from ETL_DB_* environment variables and closed by this function.
+    """
+    if not records:
+        return 0
+
+    expected = set(COLUMN_NAMES)
+    for index, record in enumerate(records, start=1):
+        actual = set(record)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            details = []
+            if missing:
+                details.append(f"missing columns: {', '.join(missing)}")
+            if extra:
+                details.append(f"unexpected columns: {', '.join(extra)}")
+            raise ValueError(f"Record {index}: " + "; ".join(details))
+        if record[PRIMARY_KEY] is None:
+            raise ValueError(f"Record {index}: primary key {PRIMARY_KEY!r} cannot be null")
+
+    owns_connection = connection is None
+    if owns_connection:
+        connection = psycopg2.connect(**_connection_settings())
+
+    try:
+        with connection.cursor() as cursor:
+            statement = _upsert_statement()
+            values = [tuple(record[name] for name in COLUMN_NAMES) for record in records]
+            cursor.executemany(statement, values)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        if owns_connection:
+            connection.close()
+
+    return len(records)
