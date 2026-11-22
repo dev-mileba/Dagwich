@@ -1,0 +1,14 @@
+"""Target table schema selected during Copier generation."""
+
+TARGET_TABLE = {{ target_table|tojson }}
+COLUMNS = [
+{% for column in target_columns %}
+    {
+        "name": {{ column.name|tojson }},
+        "sql_type": {{ column.sql_type|tojson }},
+        "primary_key": {% if column.primary_key %}True{% else %}False{% endif %},
+    },
+{% endfor %}
+]
+COLUMN_NAMES = tuple(column["name"] for column in COLUMNS)
+PRIMARY_KEY = next(column["name"] for column in COLUMNS if column["primary_key"])

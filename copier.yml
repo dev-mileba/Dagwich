@@ -31,3 +31,50 @@ module_name:
     {% elif module_name in ['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'match', 'case', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield'] %}
     This is a reserved Python keyword; choose another module name.
     {% endif %}
+
+target_table:
+  type: str
+  help: PostgreSQL target table name (lowercase letters, digits, and underscores; start with a letter).
+  default: etl_records
+  validator: >-
+    {% if not target_table|regex_search('^[a-z][a-z0-9_]*$') %}
+    Use lowercase letters, digits, and underscores, and start with a letter.
+    {% endif %}
+
+target_columns:
+  type: yaml
+  help: >-
+    Target table columns as YAML. Each column needs name, sql_type, and
+    primary_key (true for exactly one column). Allowed types: TEXT, INTEGER,
+    BIGINT, NUMERIC, BOOLEAN, DATE, TIMESTAMPTZ.
+  default:
+    - name: record_id
+      sql_type: TEXT
+      primary_key: true
+    - name: record_type
+      sql_type: TEXT
+      primary_key: false
+    - name: record_value
+      sql_type: TEXT
+      primary_key: false
+  validator: >-
+    {% if not target_columns or target_columns is string or target_columns is mapping %}
+    Provide a non-empty YAML list of column definitions.
+    {% elif target_columns|selectattr('name', 'undefined')|list|length > 0
+      or target_columns|selectattr('sql_type', 'undefined')|list|length > 0
+      or target_columns|selectattr('primary_key', 'undefined')|list|length > 0 %}
+    Every column needs name, sql_type, and primary_key.
+    {% elif target_columns|selectattr('name', 'string')|list|length != target_columns|length
+      or target_columns|selectattr('name')|list|length != target_columns|length %}
+    Column names must be lowercase SQL identifiers starting with a letter.
+    {% elif target_columns|map(attribute='name')|join(',')|regex_search('(^|,)[^a-z]|(^|,)[a-z0-9_]*[^a-z0-9_,]|,,|,$') %}
+    Column names must be lowercase SQL identifiers starting with a letter.
+    {% elif target_columns|map(attribute='name')|unique|list|length != target_columns|length %}
+    Column names must be unique.
+    {% elif target_columns|selectattr('sql_type', 'in', ['TEXT', 'INTEGER', 'BIGINT', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMPTZ'])|list|length != target_columns|length %}
+    Use only TEXT, INTEGER, BIGINT, NUMERIC, BOOLEAN, DATE, or TIMESTAMPTZ column types.
+    {% elif target_columns|selectattr('primary_key', 'boolean')|list|length != target_columns|length %}
+    Each primary_key value must be true or false.
+    {% elif target_columns|selectattr('primary_key')|list|length != 1 %}
+    Mark exactly one column as the primary key.
+    {% endif %}

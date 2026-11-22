@@ -1,0 +1,85 @@
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from {{ module_name }}.schema import COLUMNS, PRIMARY_KEY
+from {{ module_name }}.transform import CsvInputError, read_csv
+
+
+def test_read_csv_normalizes_generated_sample():
+    records = read_csv("data/sample.csv")
+
+    assert len(records) == 2
+    assert list(records[0]) == [column["name"] for column in COLUMNS]
+    assert records[0][PRIMARY_KEY] is not None
+
+
+def test_read_csv_converts_configured_types(tmp_path, monkeypatch):
+    from {{ module_name }} import transform
+
+    columns = [
+        {"name": "item_id", "sql_type": "INTEGER", "primary_key": True},
+        {"name": "amount", "sql_type": "NUMERIC", "primary_key": False},
+        {"name": "active", "sql_type": "BOOLEAN", "primary_key": False},
+        {"name": "event_date", "sql_type": "DATE", "primary_key": False},
+        {"name": "created_at", "sql_type": "TIMESTAMPTZ", "primary_key": False},
+    ]
+    monkeypatch.setattr(transform, "COLUMNS", columns)
+    csv_path = tmp_path / "typed.csv"
+    csv_path.write_text(
+        "item_id,amount,active,event_date,created_at\n"
+        "42,12.50,yes,2025-01-02,2025-01-02T12:00:00-05:00\n",
+        encoding="utf-8",
+    )
+
+    assert read_csv(csv_path) == [
+        {
+            "item_id": 42,
+            "amount": Decimal("12.50"),
+            "active": True,
+            "event_date": date(2025, 1, 2),
+            "created_at": datetime(2025, 1, 2, 17, tzinfo=timezone.utc),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        ("record_id,record_type\nid,kind\n", "missing required columns"),
+        ("record_id,record_id,record_type,record_value\nid,id,a,b\n", "duplicate"),
+        ("record_id,record_type,record_value\n,kind,value\n", "primary key"),
+        ("record_id,record_type,record_value\nid,kind\n", "row 2"),
+        ("record_id,record_type,record_value\nid,kind,value,extra\n", "row 2"),
+    ],
+)
+def test_read_csv_rejects_malformed_input(tmp_path, monkeypatch, contents, message):
+    from {{ module_name }} import transform
+
+    columns = [
+        {"name": "record_id", "sql_type": "TEXT", "primary_key": True},
+        {"name": "record_type", "sql_type": "TEXT", "primary_key": False},
+        {"name": "record_value", "sql_type": "TEXT", "primary_key": False},
+    ]
+    monkeypatch.setattr(transform, "COLUMNS", columns)
+    csv_path = tmp_path / "invalid.csv"
+    csv_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(CsvInputError, match=message):
+        read_csv(csv_path)
+
+
+def test_read_csv_rejects_invalid_typed_value(tmp_path, monkeypatch):
+    from {{ module_name }} import transform
+
+    monkeypatch.setattr(
+        transform,
+        "COLUMNS",
+        [{"name": "count", "sql_type": "INTEGER", "primary_key": True}],
+    )
+    csv_path = tmp_path / "invalid_integer.csv"
+    csv_path.write_text("count\nnot-an-integer\n", encoding="utf-8")
+
+    with pytest.raises(CsvInputError, match=r"row 2, column 'count'"):
+        read_csv(csv_path)
