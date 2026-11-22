@@ -1,0 +1,113 @@
+# {{ project_name }}
+
+A local Python ETL starter generated from a Copier template. It reads
+`data/{{ csv_file }}`, validates and converts rows using the generated schema,
+then upserts them into PostgreSQL with Apache Airflow.
+
+## Requirements
+
+- Docker with the Compose plugin (Docker Desktop works on macOS and Windows).
+- `uv` and Python 3.12 for running the project tests locally.
+
+## Generate a project
+
+From a checkout of the Copier template, run:
+
+```sh
+uvx copier copy /path/to/etl-template ./generated
+cd generated/{{ project_name }}
+```
+
+Copier prompts for the project and module names, target table and columns, and
+DAG settings. The generated defaults are:
+
+- Target table: `{{ target_table }}`
+- Columns: {% for column in target_columns %}`{{ column.name }}` (`{{ column.sql_type }}`{% if column.primary_key %}, primary key{% endif %}){% if not loop.last %}, {% endif %}{% endfor %}
+- DAG ID: `{{ dag_id }}`
+- Schedule: `{% if schedule == 'manual' %}manual{% else %}{{ schedule }}{% endif %}`
+- Retries: `{{ retries }}`
+- CSV: `data/{{ csv_file }}`
+
+## Configure and start
+
+Copy the safe local defaults, then start the services:
+
+```sh
+cp .env.example .env
+docker compose up --build -d --wait
+docker compose ps
+```
+
+The stack runs Airflow standalone and a separate PostgreSQL database for ETL
+data. Airflow initializes its local metadata database on startup. Open
+<http://localhost:8080> and retrieve the generated admin credentials from
+`docker compose logs airflow`. If host port `5432` is already in use, change
+`POSTGRES_PORT` in `.env`; containers continue to connect to Postgres on port
+`5432`.
+
+The `.env` values are for local development only. Change them before exposing
+the services beyond your machine.
+
+## Create the target table and run the DAG
+
+Apply the schema generated from your Copier answers:
+
+```sh
+docker compose exec -T postgres sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < sql/create_target_table.sql
+```
+
+Run the DAG once from the command line:
+
+```sh
+docker compose exec airflow airflow dags test {{ dag_id }} 2025-01-01
+```
+
+This command runs the DAG immediately even when its configured schedule is
+manual. The DAG reads `data/{{ csv_file }}`; make sure that file exists there
+(replace the generated `data/sample.csv` if you chose a different path). Check
+the loaded rows with:
+
+```sh
+docker compose exec postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "TABLE {{ target_table }};"'
+```
+
+The upsert is safe to rerun: the configured primary key is used to update
+existing records.
+
+## Tests
+
+Create a Python 3.12 virtual environment and install the project using the
+Airflow-compatible constraints in `requirements.txt`:
+
+```sh
+uv venv --python 3.12
+uv pip install --python .venv/bin/python -r requirements.txt
+uv run pytest -q
+```
+
+Unit tests need no running database. The optional PostgreSQL integration test
+uses a separate disposable service with temporary container storage:
+
+```sh
+docker compose --profile test up -d --wait postgres-test
+ETL_TEST_DATABASE_URL=postgresql://etl_test_user:local_test_only@127.0.0.1:5433/etl_test_db \
+  uv run pytest -q -m integration
+docker compose --profile test down
+```
+
+## Stop services
+
+Stop containers while preserving the local ETL database:
+
+```sh
+docker compose down
+```
+
+To also delete the persisted Postgres and Airflow log volumes:
+
+```sh
+docker compose down --volumes
+```
