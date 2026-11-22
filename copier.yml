@@ -78,3 +78,41 @@ target_columns:
     {% elif target_columns|selectattr('primary_key')|list|length != 1 %}
     Mark exactly one column as the primary key.
     {% endif %}
+
+dag_id:
+  type: str
+  help: Airflow DAG identifier (lowercase letters, digits, and underscores; start with a letter).
+  default: "{{ module_name }}_etl"
+  validator: >-
+    {% if not dag_id|regex_search('^[a-z][a-z0-9_]*$') %}
+    Use lowercase letters, digits, and underscores, and start with a letter.
+    {% endif %}
+
+schedule:
+  type: str
+  help: Airflow schedule preset, five-field cron expression, or "manual" to disable scheduling.
+  default: "@daily"
+  validator: >-
+    {% if not schedule or schedule != schedule|trim %}
+    Enter a non-empty Airflow schedule without surrounding whitespace.
+    {% elif schedule not in ['manual', '@once', '@hourly', '@daily', '@weekly', '@monthly', '@quarterly', '@yearly'] and schedule.split()|length != 5 %}
+    Use an Airflow schedule preset, a five-field cron expression, or "manual".
+    {% endif %}
+
+retries:
+  type: int
+  help: Number of task retries after failure (0-10).
+  default: 2
+  validator: >-
+    {% if retries < 0 or retries > 10 %}
+    Retries must be between 0 and 10.
+    {% endif %}
+
+csv_file:
+  type: str
+  help: CSV path relative to the generated data directory.
+  default: sample.csv
+  validator: >-
+    {% if not csv_file or not csv_file|regex_search('^[a-zA-Z0-9_-][a-zA-Z0-9_./-]*\\.csv$') or '..' in csv_file.split('/') or csv_file.startswith('/') %}
+    Use a relative .csv path inside data/ without parent-directory segments.
+    {% endif %}

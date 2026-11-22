@@ -1,0 +1,32 @@
+"""Airflow DAG for loading the configured CSV into PostgreSQL."""
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+from airflow import DAG
+from airflow.decorators import task
+
+from {{ module_name }}.loader import load_records
+from {{ module_name }}.transform import read_csv
+
+
+CSV_PATH = Path("/opt/airflow/data") / {{ csv_file|tojson }}
+SCHEDULE = {% if schedule == 'manual' %}None{% else %}{{ schedule|tojson }}{% endif %}
+
+with DAG(
+    dag_id={{ dag_id|tojson }},
+    schedule=SCHEDULE,
+    start_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    catchup=False,
+    max_active_runs=1,
+    default_args={"retries": {{ retries }}},
+    tags=["etl"],
+    doc_md="Reads and validates the configured CSV, then upserts records into PostgreSQL.",
+) as dag:
+
+    @task
+    def load_csv_to_postgres() -> int:
+        records = read_csv(CSV_PATH)
+        return load_records(records)
+
+    load_csv_to_postgres()
