@@ -52,6 +52,12 @@ services:
       - ./dags:/opt/airflow/dags
       - ./data:/opt/airflow/data:ro
       - airflow_logs:/opt/airflow/logs
+    healthcheck:
+      test: ["CMD-SHELL", "airflow db check-migrations --migration-wait-timeout 5"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
 
 volumes:
   postgres_data:

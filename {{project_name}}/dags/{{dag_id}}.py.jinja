@@ -3,8 +3,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from airflow import DAG
-from airflow.decorators import task
+from airflow.sdk import DAG, task
 
 from {{ module_name }}.loader import load_records
 from {{ module_name }}.transform import read_csv
